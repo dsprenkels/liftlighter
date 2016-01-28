@@ -25,7 +25,7 @@ def decide_state_K(light, d):
     """Decide the current state for the K (random) light"""
     if light.state == "unset":
         light.state = "on" if random.randint(0, 1) else "off"
-    if not random.randint(0, FREQ*60*60):
+    if random.randint(1, FREQ*60*60) == 1:
         # change once per hour on avarage
         light.state = "on" if light.state == "off" else "off"
 
@@ -124,7 +124,7 @@ def main():
                 decide_state(light, d)
             onoff = [lights[pin].state == "on" for pin in PINS]
             GPIO.output(PINS, onoff)
-            time.sleep(1 // FREQ)
+            time.sleep(1.0 / FREQ)
     finally:
         GPIO.cleanup()
 
