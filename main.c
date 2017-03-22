@@ -4,7 +4,9 @@
 #define BLOCK_END_M 30
 #define BLOCK_ANNOUNCE_M 37
 #define DEFAULT_FLASH_FREQ 1
-#define DEFAULT_MSG_LEN 50
+#define DEFAULT_MSG_LEN 80
+#define LONG_PRESS_DURATION 1000 /* ms */
+
 
 #include "random.h"
 #include "usart.h"
@@ -56,7 +58,10 @@ const struct Output LIGHTS[] = {
 	{&DDRC, DDC3, &PORTC, PB3}
 };
 const int LIGHT_COUNT = sizeof(LIGHTS) / sizeof(LIGHTS[0]);
-volatile enum {OFF = 0, ON = 1, FLASHING = 2} K_STATE = 0;
+volatile enum {K_OFF, K_ON, K_FLASHING} K_STATE = K_OFF;
+volatile enum {CONTROL_OFF, CONTROL_HOUR, CONTROL_MINUTE, CONTROL_SECOND}
+	CONTROL_STATE = CONTROL_OFF;
+volatile int CONTROL_BUTTON_PRESSED_MS = 0;
 
 
 /* UTILITY FUNCTIONS */
@@ -87,10 +92,17 @@ bool time_even_second()
 	return SECOND % 2 == 0;
 }
 
+
 bool time_flashing_on(const int freq)
 {
 	const int dticks = 256 / (2*freq);
 	return (TICK / dticks) % 2 == 0;
+}
+
+
+bool control_button_is_down()
+{
+	return (*CONTROL_BUTTON.pin_reg & (1 << CONTROL_BUTTON.pin_shl)) == 0;
 }
 
 
@@ -210,7 +222,7 @@ bool get_light_b_value() {
 
 
 bool get_light_k_value() {
-	return K_STATE == ON || (K_STATE == FLASHING && time_flashing_on(2));
+	return K_STATE == K_ON || (K_STATE == K_FLASHING && time_flashing_on(2));
 }
 
 
@@ -227,8 +239,70 @@ bool get_light_up_value() {
 		   time_is_between(15, BLOCK_ANNOUNCE_M, 15, BLOCK_BEGIN_M);
 }
 
+/* CHANGING THE CURRENT TIME */
+
+void control_button_shortpress()
+{
+	char msg[DEFAULT_MSG_LEN];
+
+	// update time figure
+	switch (CONTROL_STATE) {
+		case CONTROL_OFF:
+			// do nothing
+			break;
+		case CONTROL_HOUR:
+			HOUR++;
+			break;
+		case CONTROL_MINUTE:
+			MINUTE++;
+			break;
+		case CONTROL_SECOND:
+			SECOND++;
+			break;
+		default:
+			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
+					 __FILE__, __LINE__, CONTROL_STATE);
+			usart_transmit_str(msg);
+			CONTROL_STATE = CONTROL_OFF;
+			break;
+	}
+}
+
+void control_button_longpress()
+{
+	char msg[DEFAULT_MSG_LEN];
+
+	// go to the next control state
+	switch (CONTROL_STATE) {
+		case CONTROL_OFF:
+			CONTROL_STATE = CONTROL_HOUR;
+			break;
+		case CONTROL_HOUR:
+			CONTROL_STATE = CONTROL_MINUTE;
+			break;
+		case CONTROL_MINUTE:
+			CONTROL_STATE = CONTROL_SECOND;
+			break;
+		case CONTROL_SECOND:
+			CONTROL_STATE = CONTROL_OFF;
+			break;
+		default:
+			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
+					 __FILE__, __LINE__, CONTROL_STATE);
+			usart_transmit_str(msg);
+			CONTROL_STATE = CONTROL_OFF;
+			break;
+	}
+}
+
 
 /* INTERRUPT HANDLERS */
+
+ISR(INT0_vect)
+{
+	// the CONTROL button is down, reset the timer
+	CONTROL_BUTTON_PRESSED_MS = 0;
+}
 
 ISR(TIMER2_OVF_vect)
 {
@@ -282,8 +356,8 @@ void init()
 		} else if (light->ddr_reg == &DDRD) {
 			ddrd |= 1 << light->ddr_shl;
 		} else {
-			snprintf(msg, sizeof(msg), "[ERROR] invalid DDRx register: 0x%p\r\n",
-			         (char*) light->ddr_reg);
+			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid DDRx register: 0x%p\r\n",
+			         __FILE__, __LINE__, (char*) light->ddr_reg);
 			usart_transmit_str(msg);
 		}
 	}
@@ -313,11 +387,15 @@ void init()
 	while ((ASSR & (1 << TCR2UB)) != 0) {} // wait TCCR2 to update
 	TIMSK |= 1 << TOIE2; // enable overflow interrupt
 
-#ifdef WATCHDOG_ENABLED
+	// setup the INT0 interrupt source
+	MCUCR |= 1 << ISC01; // on falling edge
+	GICR |= 1 << INT0; // enable interrupt on INT0
+
+#ifdef ENABLE_WATCHDOG
 	// enable watchdog Timer (watchdog of about 2 secs)
 	wdt_reset();
 	WDTCR |= (1 << WDE) | (1 << WDP2) | (1 << WDP1) | (1 << WDP0);
-#endif /* WATCHDOG_ENABLED */
+#endif /* ENABLE_WATCHDOG */
 
 	// enable global interrupt
 	sei();
@@ -329,47 +407,79 @@ void update_state()
 	char msg[DEFAULT_MSG_LEN];
 
 	switch (K_STATE) {
-		case ON:
-		case OFF:
+		case K_ON:
+		case K_OFF:
 			// once every 5 hours (random), choose for `K` a new random state
 			if (randint(1, 5*60*60) <= 1) {
 				// go flashing one every 24 times (rare; once per 5 days)
 				if (randint(1, 24) <= 1) {
-					K_STATE = FLASHING;
+					K_STATE = K_FLASHING;
 				} else {
 					K_STATE = !K_STATE;
 				}
 			}
 			break;
-		case FLASHING:
+		case K_FLASHING:
 			// stop flashing after (on average) 100 seconds
 			if (randint(1, 100) <= 1) {
-				K_STATE = OFF;
+				K_STATE = K_OFF;
 			}
 			break;
 		default:
 			// unreachable state, reset
-			snprintf(msg, sizeof(msg), "[ERROR] invalid K_STATE: %i\r\n", K_STATE);
+			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid K_STATE: %i\r\n",
+			         __FILE__, __LINE__, K_STATE);
 			usart_transmit_str(msg);
-			K_STATE = OFF;
+			K_STATE = K_OFF;
 	}
 }
 
 
 void update_lights()
 {
-	const bool lights_on[] = {
-		get_light_down_value(),
-		get_light_one_value(),
-		get_light_two_value(),
-		get_light_three_value(),
-		get_light_four_value(),
-		get_light_five_value(),
-		get_light_b_value(),
-		get_light_k_value(),
-		get_light_s_value(),
-		get_light_up_value()
-	};
+	bool lights_on[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	int figure;
+	char msg[DEFAULT_MSG_LEN];
+	int i;
+
+	if (CONTROL_STATE == CONTROL_OFF) {
+		lights_on[0] = get_light_down_value();
+		lights_on[1] = get_light_one_value();
+		lights_on[2] = get_light_two_value();
+		lights_on[3] = get_light_three_value();
+		lights_on[4] = get_light_four_value();
+		lights_on[5] = get_light_five_value();
+		lights_on[6] = get_light_b_value();
+		lights_on[7] = get_light_k_value();
+		lights_on[8] = get_light_s_value();
+		lights_on[9] = get_light_up_value();
+	} else {
+		switch (CONTROL_STATE) {
+			case CONTROL_OFF:
+				snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) unreachable\r\n",
+				         __FILE__, __LINE__);
+				usart_transmit_str(msg);
+				return;
+			case CONTROL_HOUR:
+				figure = HOUR;
+				break;
+			case CONTROL_MINUTE:
+				figure = MINUTE;
+				break;
+			case CONTROL_SECOND:
+				figure = SECOND;
+				break;
+			default:
+				snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
+				         __FILE__, __LINE__, CONTROL_STATE);
+				usart_transmit_str(msg);
+				CONTROL_STATE = CONTROL_OFF;
+				return;
+		}
+		for (i = 0; i < LIGHT_COUNT; i++) {
+			lights_on[LIGHT_COUNT-i] = (figure & (1 << i)) != 0 && time_flashing_on(2);
+		}
+	}
 	switch_lights(lights_on);
 }
 
@@ -389,12 +499,27 @@ int main(void)
 	sleep_cpu();
 	while (STATE_INVALIDATED) {
 		cpubusy_on();
-		STATE_INVALIDATED = false;
-#ifdef WATCHDOG_ENABLED
-		wdt_reset(); // reset watchdog
-#endif /* WATCHDOG_ENABLED */
-		update_state();
+		#ifdef ENABLE_WATCHDOG
+				wdt_reset(); // reset watchdog
+		#endif /* ENABLE_WATCHDOG */
+
+		if (control_button_is_down()) {
+			if (CONTROL_BUTTON_PRESSED_MS == LONG_PRESS_DURATION) {
+				control_button_longpress();
+			} else {
+				_delay_ms(1);
+				CONTROL_BUTTON_PRESSED_MS++;
+			}
+		} else if (CONTROL_BUTTON_PRESSED_MS != 0) {
+			// control button has *just* been lifted
+			control_button_shortpress();
+		} else {
+			STATE_INVALIDATED = false;
+			update_state();
+		}
+
 		update_lights();
+
 		cpubusy_off();
 	}
 	goto do_sleep;
