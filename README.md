@@ -1,7 +1,8 @@
 # LiftLighter
 
-I once found an old lift indicator in the FNWI building (credits to Luuk van
-Summeren). If you don't know what I mean, [here is an example][photo].
+I once found an old lift indicator in Radboud University's Faculty of
+Science (credits to Luuk van Summeren). If you don't know what I mean,
+[here is an example][photo].
 
 The indicator has ten lights: down, 1, 2, 3, 4, 5, B, S, K and up. This
 repository contains the KiCad files for the circuit board and the software
