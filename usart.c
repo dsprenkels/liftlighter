@@ -16,5 +16,5 @@ void usart_transmit_buf(const char *buf, const int len) {
 
 void usart_transmit_str(const char *src) {
 	const int len = strlen(src);
-	return usart_transmit_buf(src, len);
+	usart_transmit_buf(src, len);
 }

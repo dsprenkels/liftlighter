@@ -66,22 +66,22 @@ volatile int CONTROL_BUTTON_PRESSED_MS = 0;
 
 /* UTILITY FUNCTIONS */
 
-bool time_is_between_s(h0, m0, s0, h1, m1, s1)
+bool time_is_between_s(char h0, char m0, char s0, char h1, char m1, char s1)
 {
 	const char start[] = {h0, m0, s0};
 	const char end[] = {h1, m1, s1};
 	const char now[] = {HOUR, MINUTE, SECOND};
-	if (strncmp(start, end, 3) < 0) {
+	if (memcmp(start, end, 3) < 0) {
 		// normal
-		return strncmp(start, now, 3) < 0 && strncmp(now, end, 3) < 0;
+		return memcmp(start, now, 3) < 0 && memcmp(now, end, 3) < 0;
 	} else {
 		// end < start
-		return !(strncmp(start, now, 3) < 0 && strncmp(now, end, 3) < 0);
+		return !(memcmp(start, now, 3) < 0 && memcmp(now, end, 3) < 0);
 	}
 }
 
 
-bool time_is_between(h0, m0, h1, m1)
+bool time_is_between(char h0, char m0, char h1, char m1)
 {
 	return time_is_between_s(h0, m0, 0, h1, m1, 0);
 }
@@ -357,7 +357,7 @@ void init()
 			ddrd |= 1 << light->ddr_shl;
 		} else {
 			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid DDRx register: 0x%p\r\n",
-			         __FILE__, __LINE__, (char*) light->ddr_reg);
+			         __FILE__, __LINE__, light->ddr_reg);
 			usart_transmit_str(msg);
 		}
 	}
