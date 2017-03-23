@@ -13,7 +13,7 @@ void usart_init()
 	// do not enable any interrupts
 }
 
-void usart_transmit_buf(const char *buf, const int len);
+void usart_transmit_buf(const uint8_t *buf, const int len);
 
 void usart_transmit_str(const char *src);
 

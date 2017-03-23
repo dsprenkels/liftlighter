@@ -1,8 +1,8 @@
 MCU=atmega8
 AVRDUDEMCU=m8
 CC=avr-gcc
-CFLAGS = -std=c99 -pedantic -Wall -Wshadow -Wpointer-arith -Wcast-qual \
-         -Wformat-security \
+CFLAGS += -std=c99 -pedantic -Wall -Wconversion -Wshadow -Wpointer-arith \
+         -Wcast-qual -Wformat-security \
          -g -O2 -mcall-prologues -mmcu=$(MCU)
 OBJ2HEX=/usr/bin/avr-objcopy
 AVRDUDE=/usr/local/bin/avrdude

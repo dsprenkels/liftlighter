@@ -1,7 +1,7 @@
 #include <avr/io.h>
 #include <string.h>
 
-void usart_transmit_buf(const char *buf, const int len) {
+void usart_transmit_buf(const uint8_t *buf, const size_t len) {
 	int i;
 
 	for (i = 0; i < len; i++) {
@@ -15,6 +15,6 @@ void usart_transmit_buf(const char *buf, const int len) {
 
 
 void usart_transmit_str(const char *src) {
-	const int len = strlen(src);
-	usart_transmit_buf(src, len);
+	const size_t len = strlen(src);
+	usart_transmit_buf((const uint8_t*) src, len);
 }

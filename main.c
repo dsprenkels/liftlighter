@@ -3,7 +3,7 @@
 #define BLOCK_BEGIN_M 45
 #define BLOCK_END_M 30
 #define BLOCK_ANNOUNCE_M 37
-#define DEFAULT_FLASH_FREQ 1
+#define DEFAULT_FLASH_FREQ 1.0
 #define DEFAULT_MSG_LEN 80
 #define LONG_PRESS_DURATION 1000 /* ms */
 
@@ -13,11 +13,13 @@
 #include <avr/cpufunc.h>
 #include <avr/interrupt.h>
 #include <avr/sleep.h>
-#include <avr/wdt.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <string.h>
 #include <util/delay.h>
+
+#ifdef ENABLE_WATCHDOG
+#include <avr/wdt.h>
+#endif /* ENABLE_WATCHDOG */
 
 
 struct Input {
@@ -36,12 +38,19 @@ struct Output {
 };
 
 
-// ticks (256 ticks correspond to one second)
-volatile char HOUR = 0, MINUTE = 0, SECOND = 0, TICK = 0;
+// ticks (256 ticks correspond to one second, 0 is 00:00, start at 12:00)
+#define SECOND (uint32_t) (256)
+#define MINUTE (uint32_t) (60 * SECOND)
+#define HOUR (uint32_t) (60 * MINUTE)
+#define DAY (uint32_t) (24 * HOUR)
+volatile uint32_t TICK = 12 * HOUR;
+
 
 // state invalidated (if ==true, then update the state of the lights)
 volatile bool STATE_INVALIDATED = 1; // state invalidated on startup
 
+
+// inputs and outputs
 const struct Input CONTROL_BUTTON = {&DDRD, DDD7, &PIND, PIND7};
 const struct Input S_SWITCH = {&DDRD, DDD5, &PIND, PIND5};
 const struct Output CPUBUSY_LED = {&DDRD, DDD4, &PORTD, PD4};
@@ -57,45 +66,52 @@ const struct Output LIGHTS[] = {
 	{&DDRC, DDC2, &PORTC, PB2},
 	{&DDRC, DDC3, &PORTC, PB3}
 };
-const int LIGHT_COUNT = sizeof(LIGHTS) / sizeof(LIGHTS[0]);
+const size_t LIGHT_COUNT = sizeof(LIGHTS) / sizeof(LIGHTS[0]);
 volatile enum {K_OFF, K_ON, K_FLASHING} K_STATE = K_OFF;
 volatile enum {CONTROL_OFF, CONTROL_HOUR, CONTROL_MINUTE, CONTROL_SECOND}
 	CONTROL_STATE = CONTROL_OFF;
-volatile int CONTROL_BUTTON_PRESSED_MS = 0;
+volatile uint32_t CONTROL_BUTTON_PRESSED_MS = 0;
 
 
 /* UTILITY FUNCTIONS */
 
-bool time_is_between_s(char h0, char m0, char s0, char h1, char m1, char s1)
+uint32_t hmst(const uint32_t h, const uint32_t m, const uint32_t s, const uint32_t t)
 {
-	const char start[] = {h0, m0, s0};
-	const char end[] = {h1, m1, s1};
-	const char now[] = {HOUR, MINUTE, SECOND};
-	if (memcmp(start, end, 3) < 0) {
+	uint32_t ret = 0;
+	ret += h * HOUR;
+	ret += m * MINUTE;
+	ret += s * SECOND;
+	ret += t;
+	return ret;
+}
+
+
+uint32_t hms(const uint32_t h, const uint32_t m, const uint32_t s) {
+	return hmst(h, m, s, 0);
+}
+
+
+uint32_t hm(const uint32_t h, const uint32_t m) {
+	return hms(h, m, 0);
+}
+
+
+bool time_is_between(uint32_t start, uint32_t end)
+{
+	if (start <= end) {
 		// normal
-		return memcmp(start, now, 3) < 0 && memcmp(now, end, 3) < 0;
+		return start <= TICK && TICK <= end;
 	} else {
 		// end < start
-		return !(memcmp(start, now, 3) < 0 && memcmp(now, end, 3) < 0);
+		return start <= TICK || TICK <= end;
 	}
 }
 
 
-bool time_is_between(char h0, char m0, char h1, char m1)
+bool time_flashing_on(const float freq)
 {
-	return time_is_between_s(h0, m0, 0, h1, m1, 0);
-}
-
-
-bool time_even_second()
-{
-	return SECOND % 2 == 0;
-}
-
-
-bool time_flashing_on(const int freq)
-{
-	const int dticks = 256 / (2*freq);
+	const float second = (float) SECOND;
+	const uint32_t dticks = (uint32_t) round(second / (2.0*freq));
 	return (TICK / dticks) % 2 == 0;
 }
 
@@ -116,7 +132,7 @@ void cpubusy_on()
 
 void cpubusy_off()
 {
-	*CPUBUSY_LED.port_reg &= ~CPUBUSY_LED.port_shl;
+	*CPUBUSY_LED.port_reg &= (unsigned char) ~CPUBUSY_LED.port_shl;
 }
 
 
@@ -124,31 +140,31 @@ void cpubusy_off()
 
 void switch_lights(const bool lights_on[LIGHT_COUNT])
 {
-	int i;
-	char maskb = 0, maskc = 0;
-	char portb = 0, portc = 0;
+	size_t i;
+	uint8_t maskb = 0, maskc = 0;
+	uint8_t portb = 0, portc = 0;
 	const struct Output *light;
 
 	// which bits are we allowed to touch?
 	for (i = 0; i < LIGHT_COUNT; i++) {
-		maskb |= LIGHTS[i].port_reg == &PORTB;
-		maskc |= LIGHTS[i].port_reg == &PORTC;
+		maskb |= (uint8_t) ((LIGHTS[i].port_reg == &PORTB) << LIGHTS[i].port_shl);
+		maskc |= (uint8_t) ((LIGHTS[i].port_reg == &PORTC) << LIGHTS[i].port_shl);
 	}
 
 	// build new PORT{B,C} values
 	for (i = 0; i < LIGHT_COUNT; i++) {
 		light = &LIGHTS[i];
 		if (light->port_reg == &PORTB) {
-			portb |= lights_on[i] << light->port_shl;
+			portb |= (uint8_t) (lights_on[i] << light->port_shl);
 		}
 		if (light->port_reg == &PORTC) {
-			portc |= lights_on[i] << light->port_shl;
+			portc |= (uint8_t) (lights_on[i] << light->port_shl);
 		}
 	}
 
 	// output values
-	PORTB = (PORTB & ~maskb) | portb;
-	PORTC = (PORTC & ~maskc) | portc;
+	PORTB = (uint8_t) (PORTB & ~maskb) | portb;
+	PORTC = (uint8_t) (PORTC & ~maskc) | portc;
 }
 
 
@@ -156,16 +172,16 @@ void switch_lights(const bool lights_on[LIGHT_COUNT])
 
 bool get_light_down_value()
 {
-	return time_is_between(21, 30, 8, 0);
+	return time_is_between(hm(21, 30), hm(8, 0));
 }
 
 
 bool get_light_one_value()
 {
 	// on during the first block
-	if (time_is_between(8, BLOCK_BEGIN_M, 10, BLOCK_END_M)) {
+	if (time_is_between(hm(8, BLOCK_BEGIN_M), hm(10, BLOCK_END_M))) {
 		return true;
-	} else if (time_is_between(8, BLOCK_ANNOUNCE_M, 8, BLOCK_BEGIN_M)) {
+	} else if (time_is_between(hm(8, BLOCK_ANNOUNCE_M), hm(8, BLOCK_BEGIN_M))) {
 		return time_flashing_on(DEFAULT_FLASH_FREQ);
 	}
 	return false;
@@ -175,21 +191,21 @@ bool get_light_one_value()
 bool get_light_two_value()
 {
 	// on during the second block
-	if (time_is_between(10, BLOCK_BEGIN_M, 12, BLOCK_END_M)) {
-		return 1;
-	} else if (time_is_between(10, BLOCK_ANNOUNCE_M, 10, BLOCK_BEGIN_M)) {
+	if (time_is_between(hm(10, BLOCK_BEGIN_M), hm(12, BLOCK_END_M))) {
+		return true;
+	} else if (time_is_between(hm(10, BLOCK_ANNOUNCE_M), hm(10, BLOCK_BEGIN_M))) {
 		return time_flashing_on(DEFAULT_FLASH_FREQ);
 	} else {
-		return 0;
+		return false;
 	}
 }
 
 
 bool get_light_three_value() {
 	// on during the third block
-	if (time_is_between(13, BLOCK_BEGIN_M, 15, BLOCK_END_M)) {
+	if (time_is_between(hm(13, BLOCK_BEGIN_M), hm(15, BLOCK_END_M))) {
 		return 1;
-	} else if (time_is_between(13, BLOCK_ANNOUNCE_M, 13, BLOCK_BEGIN_M)) {
+	} else if (time_is_between(hm(13, BLOCK_ANNOUNCE_M), hm(13, BLOCK_BEGIN_M))) {
 		return time_flashing_on(DEFAULT_FLASH_FREQ);
 	} else {
 		return 0;
@@ -199,9 +215,9 @@ bool get_light_three_value() {
 
 bool get_light_four_value() {
 	// on during the fourth block
-	if (time_is_between(15, BLOCK_BEGIN_M, 17, BLOCK_END_M)) {
+	if (time_is_between(hm(15, BLOCK_BEGIN_M), hm(17, BLOCK_END_M))) {
 		return 1;
-	} else if (time_is_between(15, BLOCK_ANNOUNCE_M, 15, BLOCK_BEGIN_M)) {
+	} else if (time_is_between(hm(15, BLOCK_ANNOUNCE_M), hm(15, BLOCK_BEGIN_M))) {
 		return time_flashing_on(DEFAULT_FLASH_FREQ);
 	} else {
 		return 0;
@@ -211,18 +227,18 @@ bool get_light_four_value() {
 
 bool get_light_five_value() {
 	// opening times of the Refter
-	return time_is_between(17, 0, 19, 0);
+	return time_is_between(hm(17, 0), hm(19, 0));
 }
 
 
 bool get_light_b_value() {
 	// is it time for beer?
-	return time_is_between(16, 00, 21, 00);
+	return time_is_between(hm(16, 00), hm(21, 00));
 }
 
 
 bool get_light_k_value() {
-	return K_STATE == K_ON || (K_STATE == K_FLASHING && time_flashing_on(2));
+	return K_STATE == K_ON || (K_STATE == K_FLASHING && time_flashing_on(2.0));
 }
 
 
@@ -233,10 +249,10 @@ bool get_light_s_value() {
 
 
 bool get_light_up_value() {
-	return time_is_between( 8, BLOCK_ANNOUNCE_M,  8, BLOCK_BEGIN_M) ||
-		   time_is_between(10, BLOCK_ANNOUNCE_M, 10, BLOCK_BEGIN_M) ||
-		   time_is_between(13, BLOCK_ANNOUNCE_M, 13, BLOCK_BEGIN_M) ||
-		   time_is_between(15, BLOCK_ANNOUNCE_M, 15, BLOCK_BEGIN_M);
+	return time_is_between(hm( 8, BLOCK_ANNOUNCE_M), hm( 8, BLOCK_BEGIN_M)) ||
+		   time_is_between(hm(10, BLOCK_ANNOUNCE_M), hm(10, BLOCK_BEGIN_M)) ||
+		   time_is_between(hm(13, BLOCK_ANNOUNCE_M), hm(13, BLOCK_BEGIN_M)) ||
+		   time_is_between(hm(15, BLOCK_ANNOUNCE_M), hm(15, BLOCK_BEGIN_M));
 }
 
 /* CHANGING THE CURRENT TIME */
@@ -251,13 +267,14 @@ void control_button_shortpress()
 			// do nothing
 			break;
 		case CONTROL_HOUR:
-			HOUR++;
+			TICK = (TICK + HOUR) % DAY;
 			break;
 		case CONTROL_MINUTE:
-			MINUTE++;
+			TICK = (TICK + MINUTE) % DAY;
 			break;
 		case CONTROL_SECOND:
-			SECOND++;
+			// reset to 0 seconds in minute
+			TICK /= MINUTE;
 			break;
 		default:
 			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
@@ -306,31 +323,10 @@ ISR(INT0_vect)
 
 ISR(TIMER2_OVF_vect)
 {
-	if (++TICK == 0) {
+	TICK = (TICK + 1) % DAY;
+	if (TICK % SECOND == 0) {
 		STATE_INVALIDATED = true;
-		goto inc_second;
 	}
-	return;
-
-	inc_second:
-	if (++SECOND == 60) {
-		SECOND = 0;
-		goto inc_minute;
-	}
-	return;
-
-	inc_minute:
-	if (++MINUTE == 60) {
-		MINUTE = 0;
-		goto inc_hour;
-	}
-	return;
-
-	inc_hour:
-	if (++HOUR == 24) {
-		HOUR = 0;
-	}
-	return;
 }
 
 
@@ -338,23 +334,23 @@ ISR(TIMER2_OVF_vect)
 
 void init()
 {
-	int i;
+	size_t i;
 	const struct Output *light;
-	unsigned char ddrb = 0, ddrc = 0, ddrd = 0;
+	uint8_t ddrb = 0, ddrc = 0, ddrd = 0;
 	char msg[DEFAULT_MSG_LEN];
 
 	// set cpubusy led pin to output
-	*CPUBUSY_LED.ddr_reg |= 1 << CPUBUSY_LED.ddr_shl;
+	*CPUBUSY_LED.ddr_reg |= (uint8_t) (1 << CPUBUSY_LED.ddr_shl);
 
 	// set all light pins to output
 	for (i = 0; i < LIGHT_COUNT; i++) {
 		light = &LIGHTS[i];
 		if (light->ddr_reg == &DDRB) {
-			ddrb |= 1 << light->ddr_shl;
+			ddrb |= (uint8_t) (1 << light->ddr_shl);
 		} else if (light->ddr_reg == &DDRC) {
-			ddrc |= 1 << light->ddr_shl;
+			ddrc |= (uint8_t) (1 << light->ddr_shl);
 		} else if (light->ddr_reg == &DDRD) {
-			ddrd |= 1 << light->ddr_shl;
+			ddrd |= (uint8_t) (1 << light->ddr_shl);
 		} else {
 			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid DDRx register: 0x%p\r\n",
 			         __FILE__, __LINE__, light->ddr_reg);
@@ -372,11 +368,11 @@ void init()
 	switch_lights(lights_on);
 
 	// set CONTROL_BUTTON to input
-	*CONTROL_BUTTON.ddr_reg &= ~(1 << CONTROL_BUTTON.ddr_shl);
+	*CONTROL_BUTTON.ddr_reg &= (uint8_t) ~(1 << CONTROL_BUTTON.ddr_shl);
 	_NOP();
 
 	// set S_SWITCH to input
-	*S_SWITCH.ddr_reg &= ~(1 << S_SWITCH.ddr_shl);
+	*S_SWITCH.ddr_reg &= (uint8_t) ~(1 << S_SWITCH.ddr_shl);
 	_NOP();
 
 	// initialize Timer/Counter2 to measure seconds
@@ -437,10 +433,11 @@ void update_state()
 
 void update_lights()
 {
-	bool lights_on[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-	int figure;
+	bool lights_on[] = {false, false, false, false, false,
+		                false, false, false, false, false};
+	uint32_t figure;
 	char msg[DEFAULT_MSG_LEN];
-	int i;
+	size_t i;
 
 	if (CONTROL_STATE == CONTROL_OFF) {
 		lights_on[0] = get_light_down_value();
@@ -461,13 +458,13 @@ void update_lights()
 				usart_transmit_str(msg);
 				return;
 			case CONTROL_HOUR:
-				figure = HOUR;
+				figure = TICK / HOUR;
 				break;
 			case CONTROL_MINUTE:
-				figure = MINUTE;
+				figure = TICK / MINUTE % HOUR;
 				break;
 			case CONTROL_SECOND:
-				figure = SECOND;
+				figure = TICK / SECOND % MINUTE;
 				break;
 			default:
 				snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
@@ -477,7 +474,8 @@ void update_lights()
 				return;
 		}
 		for (i = 0; i < LIGHT_COUNT; i++) {
-			lights_on[LIGHT_COUNT-i] = (figure & (1 << i)) != 0 && time_flashing_on(2);
+			lights_on[LIGHT_COUNT-i] = ((figure & ((uint32_t) 1 << i)) != 0) &&
+			                           time_flashing_on(2.0);
 		}
 	}
 	switch_lights(lights_on);
@@ -498,11 +496,15 @@ int main(void)
 	do_sleep:
 	sleep_cpu();
 	while (STATE_INVALIDATED) {
+		// turn on cpubusy led
 		cpubusy_on();
+
+		// reset the watchdog
 		#ifdef ENABLE_WATCHDOG
-				wdt_reset(); // reset watchdog
+				wdt_reset();
 		#endif /* ENABLE_WATCHDOG */
 
+		// do update logic
 		if (control_button_is_down()) {
 			if (CONTROL_BUTTON_PRESSED_MS == LONG_PRESS_DURATION) {
 				control_button_longpress();
@@ -518,8 +520,10 @@ int main(void)
 			update_state();
 		}
 
+		// show new light state
 		update_lights();
 
+		// turn off cpubusy led
 		cpubusy_off();
 	}
 	goto do_sleep;
