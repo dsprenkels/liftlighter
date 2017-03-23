@@ -15,12 +15,12 @@ $(EXECUTABLE): main.c random.o usart.o
 $(EXECUTABLE).hex: $(EXECUTABLE)
 	$(OBJ2HEX) -R .eeprom -O ihex $(EXECUTABLE) $(EXECUTABLE).hex
 
-.fuzzy: start
+.PHONY: start
 start: flash
 	sudo gpio -g mode $(RESET) out
 	sudo gpio -g write $(RESET) 1
 
-.fuzzy: stop
+.PHONY: stop
 stop:
 	sudo gpio -g mode $(RESET) out
 	sudo gpio -g write $(RESET) 0
@@ -31,6 +31,6 @@ flash: all
 fuse:
 	sudo $(AVRDUDE) -p $(AVRDUDEMCU) -P /dev/spidev0.0 -c linuxspi -b $(BAUDRATE) -U lfuse:w:0xe1:m -U hfuse:w:0xd9:m
 
-.fuzzy: clean
+.PHONY: clean
 clean:
 	rm -f $(TARGET) $(TARGET).hex *.obj *.o
