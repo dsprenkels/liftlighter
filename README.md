@@ -97,7 +97,7 @@ Atmega8][atmega8] helpful. You can also write me an email.
 
 Feel free to send me an email on my Github associated e-mail address.
 
-[photo]: http://farm4.static.flickr.com/3210/3149843161_4fa5ab7734.jpg
+[photo]: photo.jpg
 [`KiCad`]: http://kicad-pcb.org/
 [`avrdude`]: https://github.com/kcuzner/avrdude
 [Raspberri Pi as an AVR programmer]: http://kevincuzner.com/2013/05/27/raspberry-pi-as-an-avr-programmer/
