@@ -1,7 +1,7 @@
 MCU=atmega8
 AVRDUDEMCU=m8
 CC=avr-gcc
-CFLAGS += -std=c99 -pedantic -Wall -Wconversion -Wshadow -Wpointer-arith \
+CFLAGS += -std=c99 -pedantic -Wall -Wshadow -Wpointer-arith \
          -Wcast-qual -Wformat-security \
          -g -O2 -mcall-prologues -mmcu=$(MCU)
 OBJ2HEX=/usr/bin/avr-objcopy
@@ -26,6 +26,10 @@ start: flash
 stop:
 	sudo gpio -g mode $(RESET) out
 	sudo gpio -g write $(RESET) 0
+
+.PHONY: size
+size: $(EXECUTABLE)
+	avr-size $(EXECUTABLE)
 
 flash: all
 	sudo $(AVRDUDE) -p $(AVRDUDEMCU) -P /dev/spidev0.0 -c linuxspi -b $(BAUDRATE) -U flash:w:$(TARGET).hex:i

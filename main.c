@@ -6,20 +6,36 @@
 #define DEFAULT_FLASH_FREQ 1.0
 #define DEFAULT_MSG_LEN 80
 #define LONG_PRESS_DURATION 1000 /* ms */
+// Location: Nijmegen, The Netherlands
+#define LOCATION_LONGITUDE 51.8126
+#define LOCATION_LATITUDE 5.8372
+
+// 256 clock ticks correspond to one second
+#define INTS_PER_SECOND 256
 
 
 #include "random.h"
 #include "usart.h"
 #include <avr/cpufunc.h>
 #include <avr/interrupt.h>
+#include <avr/io.h>
 #include <avr/sleep.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <util/delay.h>
+#include <util/eu_dst.h>
+#include <time.h>
 
 #ifdef ENABLE_WATCHDOG
 #include <avr/wdt.h>
 #endif /* ENABLE_WATCHDOG */
+
+
+struct tm_hms {
+	int8_t tm_hour;
+	int8_t tm_min;
+	int8_t tm_sec;
+};
 
 
 struct Input {
@@ -38,85 +54,110 @@ struct Output {
 };
 
 
-// ticks (256 ticks correspond to one second, 0 is 00:00, start at 12:00)
-#define SECOND (uint32_t) (256)
-#define MINUTE (uint32_t) (60 * SECOND)
-#define HOUR (uint32_t) (60 * MINUTE)
-#define DAY (uint32_t) (24 * HOUR)
-volatile uint32_t TICK = 12 * HOUR;
-
+// clock ticks since the last seconds
+volatile uint8_t CLOCK_TICKS = 0;
 
 // state invalidated (if ==true, then update the state of the lights)
 volatile bool STATE_INVALIDATED = 1; // state invalidated on startup
 
-
 // inputs and outputs
-const struct Input CONTROL_BUTTON = {&DDRD, DDD7, &PIND, PIND7};
+const struct Input CONTROL_BUTTON = {&DDRD, PB7, &PIND, PIND7};
 const struct Input S_SWITCH = {&DDRD, DDD5, &PIND, PIND5};
 const struct Output CPUBUSY_LED = {&DDRD, DDD4, &PORTD, PD4};
 const struct Output LIGHTS[] = {
-	{&DDRB, DDB0, &PORTB, PB0},
-	{&DDRB, DDB1, &PORTB, PB1},
-	{&DDRB, DDB2, &PORTB, PB2},
-	{&DDRB, DDB3, &PORTB, PB3},
-	{&DDRB, DDB4, &PORTB, PB4},
-	{&DDRB, DDB5, &PORTB, PB5},
-	{&DDRC, DDC0, &PORTC, PC0},
-	{&DDRC, DDC1, &PORTC, PB1},
-	{&DDRC, DDC2, &PORTC, PB2},
-	{&DDRC, DDC3, &PORTC, PB3}
+	{&DDRB, PB0, &PORTB, PB0},
+	{&DDRB, PB1, &PORTB, PB1},
+	{&DDRB, PB2, &PORTB, PB2},
+	{&DDRB, PB3, &PORTB, PB3},
+	{&DDRB, PB4, &PORTB, PB4},
+	{&DDRB, PB5, &PORTB, PB5},
+	{&DDRC, PB0, &PORTC, PC0},
+	{&DDRC, PB1, &PORTC, PB1},
+	{&DDRC, PB2, &PORTC, PB2},
+	{&DDRC, PB3, &PORTC, PB3}
 };
 const size_t LIGHT_COUNT = sizeof(LIGHTS) / sizeof(LIGHTS[0]);
 volatile enum {K_OFF, K_ON, K_FLASHING} K_STATE = K_OFF;
-volatile enum {CONTROL_OFF, CONTROL_HOUR, CONTROL_MINUTE, CONTROL_SECOND}
-	CONTROL_STATE = CONTROL_OFF;
+volatile enum {
+	CONTROL_OFF,
+	CONTROL_HOUR, CONTROL_MINUTE, CONTROL_SECOND,
+	CONTROL_DAY, CONTROL_MONTH, CONTROL_YEAR
+} CONTROL_STATE = CONTROL_OFF;
 volatile uint32_t CONTROL_BUTTON_PRESSED_MS = 0;
 
 
 /* UTILITY FUNCTIONS */
 
-uint32_t hmst(const uint32_t h, const uint32_t m, const uint32_t s, const uint32_t t)
+static struct tm_hms tm_hms_new_hms(const uint8_t h, const uint8_t m, const uint8_t s)
 {
-	uint32_t ret = 0;
-	ret += h * HOUR;
-	ret += m * MINUTE;
-	ret += s * SECOND;
-	ret += t;
+	struct tm_hms ret;
+	ret.tm_hour = h;
+	ret.tm_min = m;
+	ret.tm_sec = s;
 	return ret;
 }
 
 
-uint32_t hms(const uint32_t h, const uint32_t m, const uint32_t s) {
-	return hmst(h, m, s, 0);
-}
-
-
-uint32_t hm(const uint32_t h, const uint32_t m) {
-	return hms(h, m, 0);
-}
-
-
-bool time_is_between(uint32_t start, uint32_t end)
+static struct tm_hms tm_hms_new_hm(const uint8_t h, const uint8_t m)
 {
-	if (start <= end) {
+	return tm_hms_new_hms(h, m, 0);
+}
+
+
+static bool tm_hms_lt(const struct tm_hms x, const struct tm_hms y)
+{
+	if (x.tm_hour < y.tm_hour) return true;
+	if (x.tm_hour > y.tm_hour) return false;
+	if (x.tm_min < y.tm_min) return true;
+	if (x.tm_min > y.tm_min) return false;
+	if (x.tm_sec < y.tm_sec) return true;
+	return false;
+}
+
+
+static bool tm_hms_le(const struct tm_hms x, const struct tm_hms y)
+{
+	if (x.tm_hour < y.tm_hour) return true;
+	if (x.tm_hour > y.tm_hour) return false;
+	if (x.tm_min < y.tm_min) return true;
+	if (x.tm_min > y.tm_min) return false;
+	if (x.tm_sec <= y.tm_sec) return true;
+	return false;
+}
+
+
+static struct tm_hms tm_hms_from_tm(const struct tm *in)
+{
+	struct tm_hms ret;
+	ret.tm_hour = in->tm_hour;
+	ret.tm_min = in->tm_min;
+	ret.tm_sec = in->tm_sec;
+	return ret;
+}
+
+
+static bool tm_hms_is_between(const struct tm_hms cur,
+                              const struct tm_hms start,
+                              const struct tm_hms end)
+{
+	if (tm_hms_lt(start, end)) {
 		// normal
-		return start <= TICK && TICK <= end;
+		return tm_hms_le(start, cur) && tm_hms_le(cur, end);
 	} else {
 		// end < start
-		return start <= TICK || TICK <= end;
+		return tm_hms_le(start, cur) || tm_hms_le(cur, end);
 	}
 }
 
 
-bool time_flashing_on(const float freq)
+static bool time_flashing_on(const float freq)
 {
-	const float second = (float) SECOND;
-	const uint32_t dticks = (uint32_t) round(second / (2.0*freq));
-	return (TICK / dticks) % 2 == 0;
+	const uint32_t dticks = (uint32_t) round(((float) INTS_PER_SECOND) / (2.0*freq));
+	return (CLOCK_TICKS / dticks) % 2 == 0;
 }
 
 
-bool control_button_is_down()
+static bool control_button_is_down()
 {
 	return (*CONTROL_BUTTON.pin_reg & (1 << CONTROL_BUTTON.pin_shl)) == 0;
 }
@@ -124,21 +165,35 @@ bool control_button_is_down()
 
 /* CPUBUSY_LED CONTROL */
 
-void cpubusy_on()
+static void cpubusy_on()
 {
 	*CPUBUSY_LED.port_reg |= CPUBUSY_LED.port_shl;
 }
 
 
-void cpubusy_off()
+static void cpubusy_off()
 {
 	*CPUBUSY_LED.port_reg &= (unsigned char) ~CPUBUSY_LED.port_shl;
 }
 
 
+static void print_current_localtime()
+{
+	char msg[DEFAULT_MSG_LEN], ctime_str[DEFAULT_MSG_LEN];
+	const time_t current_time = time(NULL);
+
+	// get a ctime formatted string
+	ctime_r(&current_time, ctime_str);
+
+	// write message
+	snprintf(msg, sizeof(msg), "[INFO] current time: %s\r\n", ctime_str);
+	usart_transmit_str(msg);
+}
+
+
 /* LIGHT SWITCHING */
 
-void switch_lights(const bool lights_on[LIGHT_COUNT])
+static void switch_lights(const bool lights_on[LIGHT_COUNT])
 {
 	size_t i;
 	uint8_t maskb = 0, maskc = 0;
@@ -170,122 +225,192 @@ void switch_lights(const bool lights_on[LIGHT_COUNT])
 
 /* LIGHT LOGIC */
 
-bool get_light_down_value()
+static bool get_light_down_value(const struct tm *cur_tm)
 {
-	return time_is_between(hm(21, 30), hm(8, 0));
+	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
+	const struct tm_hms start = tm_hms_new_hm(21, 30);
+	const struct tm_hms end = tm_hms_new_hm(8, 00);
+	return tm_hms_is_between(cur, start, end);
 }
 
 
-bool get_light_one_value()
+static bool get_light_one_value(const struct tm *cur_tm)
 {
 	// on during the first block
-	if (time_is_between(hm(8, BLOCK_BEGIN_M), hm(10, BLOCK_END_M))) {
+	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
+	const struct tm_hms start = tm_hms_new_hm(8, BLOCK_END_M);
+	const struct tm_hms end = tm_hms_new_hm(10, BLOCK_END_M);
+	const struct tm_hms a_start = tm_hms_new_hm(8, BLOCK_ANNOUNCE_M);
+	const struct tm_hms a_end = tm_hms_new_hm(8, BLOCK_BEGIN_M);
+
+	if (tm_hms_is_between(cur, start, end)) {
 		return true;
-	} else if (time_is_between(hm(8, BLOCK_ANNOUNCE_M), hm(8, BLOCK_BEGIN_M))) {
+	} else if (tm_hms_is_between(cur, a_start, a_end)) {
 		return time_flashing_on(DEFAULT_FLASH_FREQ);
 	}
 	return false;
 }
 
 
-bool get_light_two_value()
+static bool get_light_two_value(const struct tm *cur_tm)
 {
 	// on during the second block
-	if (time_is_between(hm(10, BLOCK_BEGIN_M), hm(12, BLOCK_END_M))) {
+	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
+	const struct tm_hms start = tm_hms_new_hm(10, BLOCK_END_M);
+	const struct tm_hms end = tm_hms_new_hm(12, BLOCK_END_M);
+	const struct tm_hms a_start = tm_hms_new_hm(10, BLOCK_ANNOUNCE_M);
+	const struct tm_hms a_end = tm_hms_new_hm(10, BLOCK_BEGIN_M);
+
+	if (tm_hms_is_between(cur, start, end)) {
 		return true;
-	} else if (time_is_between(hm(10, BLOCK_ANNOUNCE_M), hm(10, BLOCK_BEGIN_M))) {
+	} else if (tm_hms_is_between(cur, a_start, a_end)) {
 		return time_flashing_on(DEFAULT_FLASH_FREQ);
-	} else {
-		return false;
 	}
+	return false;
 }
 
 
-bool get_light_three_value() {
+static bool get_light_three_value(const struct tm *cur_tm)
+{
 	// on during the third block
-	if (time_is_between(hm(13, BLOCK_BEGIN_M), hm(15, BLOCK_END_M))) {
-		return 1;
-	} else if (time_is_between(hm(13, BLOCK_ANNOUNCE_M), hm(13, BLOCK_BEGIN_M))) {
+	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
+	const struct tm_hms start = tm_hms_new_hm(13, BLOCK_END_M);
+	const struct tm_hms end = tm_hms_new_hm(15, BLOCK_END_M);
+	const struct tm_hms a_start = tm_hms_new_hm(13, BLOCK_ANNOUNCE_M);
+	const struct tm_hms a_end = tm_hms_new_hm(13, BLOCK_BEGIN_M);
+
+	if (tm_hms_is_between(cur, start, end)) {
+		return true;
+	} else if (tm_hms_is_between(cur, a_start, a_end)) {
 		return time_flashing_on(DEFAULT_FLASH_FREQ);
-	} else {
-		return 0;
 	}
+	return false;
 }
 
 
-bool get_light_four_value() {
+static bool get_light_four_value(const struct tm *cur_tm)
+{
 	// on during the fourth block
-	if (time_is_between(hm(15, BLOCK_BEGIN_M), hm(17, BLOCK_END_M))) {
-		return 1;
-	} else if (time_is_between(hm(15, BLOCK_ANNOUNCE_M), hm(15, BLOCK_BEGIN_M))) {
+	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
+	const struct tm_hms start = tm_hms_new_hm(15, BLOCK_END_M);
+	const struct tm_hms end = tm_hms_new_hm(17, BLOCK_END_M);
+	const struct tm_hms a_start = tm_hms_new_hm(15, BLOCK_ANNOUNCE_M);
+	const struct tm_hms a_end = tm_hms_new_hm(15, BLOCK_BEGIN_M);
+
+	if (tm_hms_is_between(cur, start, end)) {
+		return true;
+	} else if (tm_hms_is_between(cur, a_start, a_end)) {
 		return time_flashing_on(DEFAULT_FLASH_FREQ);
-	} else {
-		return 0;
 	}
+	return false;
 }
 
 
-bool get_light_five_value() {
+static bool get_light_five_value(const struct tm *cur_tm)
+{
 	// opening times of the Refter
-	return time_is_between(hm(17, 0), hm(19, 0));
+	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
+	const struct tm_hms start = tm_hms_new_hm(15, 0);
+	const struct tm_hms end = tm_hms_new_hm(17, 0);
+	return tm_hms_is_between(cur, start, end);
 }
 
 
-bool get_light_b_value() {
+static bool get_light_b_value(const struct tm *cur_tm)
+{
 	// is it time for beer?
-	return time_is_between(hm(16, 00), hm(21, 00));
+	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
+	const struct tm_hms start = tm_hms_new_hm(16, 0);
+	const struct tm_hms end = tm_hms_new_hm(21, 0);
+	return tm_hms_is_between(cur, start, end);
 }
 
 
-bool get_light_k_value() {
+static bool get_light_k_value(const struct tm *cur_tm)
+{
 	return K_STATE == K_ON || (K_STATE == K_FLASHING && time_flashing_on(2.0));
 }
 
 
-bool get_light_s_value() {
+static bool get_light_s_value(const struct tm *_)
+{
 	// on if we are in the southern canteen (controlled by switch)
 	return (*S_SWITCH.pin_reg & (1 << S_SWITCH.pin_shl)) != 0;
 }
 
 
-bool get_light_up_value() {
-	return time_is_between(hm( 8, BLOCK_ANNOUNCE_M), hm( 8, BLOCK_BEGIN_M)) ||
-		   time_is_between(hm(10, BLOCK_ANNOUNCE_M), hm(10, BLOCK_BEGIN_M)) ||
-		   time_is_between(hm(13, BLOCK_ANNOUNCE_M), hm(13, BLOCK_BEGIN_M)) ||
-		   time_is_between(hm(15, BLOCK_ANNOUNCE_M), hm(15, BLOCK_BEGIN_M));
+static bool get_light_up_value(const struct tm *cur_tm)
+{
+	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
+	const struct tm_hms a_start1 = tm_hms_new_hm(8, BLOCK_ANNOUNCE_M);
+	const struct tm_hms a_end1 = tm_hms_new_hm(8, BLOCK_BEGIN_M);
+	const struct tm_hms a_start2 = tm_hms_new_hm(10, BLOCK_ANNOUNCE_M);
+	const struct tm_hms a_end2 = tm_hms_new_hm(10, BLOCK_BEGIN_M);
+	const struct tm_hms a_start3 = tm_hms_new_hm(13, BLOCK_ANNOUNCE_M);
+	const struct tm_hms a_end3 = tm_hms_new_hm(13, BLOCK_BEGIN_M);
+	const struct tm_hms a_start4 = tm_hms_new_hm(15, BLOCK_ANNOUNCE_M);
+	const struct tm_hms a_end4 = tm_hms_new_hm(15, BLOCK_BEGIN_M);
+
+	return tm_hms_is_between(cur, a_start1, a_end1) ||
+	       tm_hms_is_between(cur, a_start2, a_end2) ||
+	       tm_hms_is_between(cur, a_start3, a_end3) ||
+	       tm_hms_is_between(cur, a_start4, a_end4);
 }
+
 
 /* CHANGING THE CURRENT TIME */
 
-void control_button_shortpress()
+static void control_button_shortpress()
 {
 	char msg[DEFAULT_MSG_LEN];
+	time_t current_time = time(NULL);
+	struct tm current_tm;
+
+	localtime_r(&current_time, &current_tm);
 
 	// update time figure
 	switch (CONTROL_STATE) {
 		case CONTROL_OFF:
 			// do nothing
-			break;
+			return;
 		case CONTROL_HOUR:
-			TICK = (TICK + HOUR) % DAY;
+			current_tm.tm_hour = (current_tm.tm_hour + 1) % 24;
 			break;
 		case CONTROL_MINUTE:
-			TICK = (TICK + MINUTE) % DAY;
+			current_tm.tm_min = (current_tm.tm_min + 1) % 60;
 			break;
 		case CONTROL_SECOND:
-			// reset to 0 seconds in minute
-			TICK /= MINUTE;
+			// do not add 1, but reset to minute offset
+			current_tm.tm_sec = 0;
+			break;
+		case CONTROL_DAY:
+			current_tm.tm_mday = (current_tm.tm_mday + 1) %
+				month_length(1900 + (uint16_t) current_tm.tm_year,
+				             current_tm.tm_mon + 1);
+			break;
+
+		case CONTROL_MONTH:
+			current_tm.tm_mon = (current_tm.tm_mon + 1) % 12;
+			break;
+		case CONTROL_YEAR:
+			if (++current_tm.tm_year >= 200) {
+				current_tm.tm_year -= 100;
+			}
 			break;
 		default:
 			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
 					 __FILE__, __LINE__, CONTROL_STATE);
 			usart_transmit_str(msg);
 			CONTROL_STATE = CONTROL_OFF;
-			break;
+			return;
 	}
+
+	// write the new system time
+	set_system_time(mktime(&current_tm));
 }
 
-void control_button_longpress()
+
+static void control_button_longpress()
 {
 	char msg[DEFAULT_MSG_LEN];
 
@@ -323,16 +448,17 @@ ISR(INT0_vect)
 
 ISR(TIMER2_OVF_vect)
 {
-	TICK = (TICK + 1) % DAY;
-	if (TICK % SECOND == 0) {
-		STATE_INVALIDATED = true;
+	if (++CLOCK_TICKS == 0) {
+		system_tick();
+		print_current_localtime();
 	}
+	STATE_INVALIDATED = true;
 }
 
 
 /* MAINLOOP FUNCTIONS */
 
-void init()
+static void init()
 {
 	size_t i;
 	const struct Output *light;
@@ -375,6 +501,16 @@ void init()
 	*S_SWITCH.ddr_reg &= (uint8_t) ~(1 << S_SWITCH.ddr_shl);
 	_NOP();
 
+	// initialize the system time
+#ifdef DEFAULT_TIME
+	set_system_time(DEFAULT_TIME - UNIX_OFFSET)
+#else /* DEFAULT_TIME */
+	set_system_time(0);
+#endif /* DEFAULT_TIME */
+	set_zone(+1 * ONE_HOUR);
+	set_dst(eu_dst);
+	set_position(LOCATION_LONGITUDE, LOCATION_LATITUDE);
+
 	// initialize Timer/Counter2 to measure seconds
 	_delay_ms(1000); // wait for crystal to stabilize
 	ASSR |= 1 << AS2; // set async clocking
@@ -398,7 +534,7 @@ void init()
 }
 
 
-void update_state()
+static void update_state()
 {
 	char msg[DEFAULT_MSG_LEN];
 
@@ -407,7 +543,7 @@ void update_state()
 		case K_OFF:
 			// once every 5 hours (random), choose for `K` a new random state
 			if (randint(1, 5*60*60) <= 1) {
-				// go flashing one every 24 times (rare; once per 5 days)
+				// go flashing once every 24 times (rare; once per 5 days)
 				if (randint(1, 24) <= 1) {
 					K_STATE = K_FLASHING;
 				} else {
@@ -431,52 +567,81 @@ void update_state()
 }
 
 
-void update_lights()
+static void update_lights_normal(bool *lights_on, const struct tm *current_tm)
 {
-	bool lights_on[] = {false, false, false, false, false,
-		                false, false, false, false, false};
+	lights_on[0] = get_light_down_value(current_tm);
+	lights_on[1] = get_light_one_value(current_tm);
+	lights_on[2] = get_light_two_value(current_tm);
+	lights_on[3] = get_light_three_value(current_tm);
+	lights_on[4] = get_light_four_value(current_tm);
+	lights_on[5] = get_light_five_value(current_tm);
+	lights_on[6] = get_light_b_value(current_tm);
+	lights_on[7] = get_light_k_value(current_tm);
+	lights_on[8] = get_light_s_value(current_tm);
+	lights_on[9] = get_light_up_value(current_tm);
+}
+
+
+static void update_lights_control(bool *lights_on, const struct tm *current_tm)
+{
 	uint32_t figure;
 	char msg[DEFAULT_MSG_LEN];
 	size_t i;
 
+	switch (CONTROL_STATE) {
+		case CONTROL_OFF:
+			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) unreachable\r\n",
+			         __FILE__, __LINE__);
+			usart_transmit_str(msg);
+			return;
+		case CONTROL_HOUR:
+			figure = current_tm->tm_hour;
+			break;
+		case CONTROL_MINUTE:
+			figure = current_tm->tm_min;
+			break;
+		case CONTROL_SECOND:
+			figure = current_tm->tm_sec;
+			break;
+		case CONTROL_DAY:
+			figure = current_tm->tm_mday;
+			break;
+		case CONTROL_MONTH:
+			figure = current_tm->tm_mon + 1; // s.t. 1 is January
+			break;
+		case CONTROL_YEAR:
+			figure = current_tm->tm_year - 100; // s.t. 0 is equiv to 2000
+			break;
+		default:
+			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
+			         __FILE__, __LINE__, CONTROL_STATE);
+			usart_transmit_str(msg);
+			CONTROL_STATE = CONTROL_OFF;
+			return;
+	}
+
+	// show the figure in binary format (flashing with 2 Hz)
+	for (i = 0; i < LIGHT_COUNT; i++) {
+		lights_on[LIGHT_COUNT-i] = ((figure & ((uint32_t) 1 << i)) != 0) &&
+		                           time_flashing_on(2.0);
+	}
+
+}
+
+
+static void update_lights()
+{
+	bool lights_on[] = {false, false, false, false, false,
+	                    false, false, false, false, false};
+	const time_t current_time = time(NULL);
+	struct tm current_tm;
+
+	localtime_r(&current_time, &current_tm);
+
 	if (CONTROL_STATE == CONTROL_OFF) {
-		lights_on[0] = get_light_down_value();
-		lights_on[1] = get_light_one_value();
-		lights_on[2] = get_light_two_value();
-		lights_on[3] = get_light_three_value();
-		lights_on[4] = get_light_four_value();
-		lights_on[5] = get_light_five_value();
-		lights_on[6] = get_light_b_value();
-		lights_on[7] = get_light_k_value();
-		lights_on[8] = get_light_s_value();
-		lights_on[9] = get_light_up_value();
+		update_lights_normal(lights_on, &current_tm);
 	} else {
-		switch (CONTROL_STATE) {
-			case CONTROL_OFF:
-				snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) unreachable\r\n",
-				         __FILE__, __LINE__);
-				usart_transmit_str(msg);
-				return;
-			case CONTROL_HOUR:
-				figure = TICK / HOUR;
-				break;
-			case CONTROL_MINUTE:
-				figure = TICK / MINUTE % HOUR;
-				break;
-			case CONTROL_SECOND:
-				figure = TICK / SECOND % MINUTE;
-				break;
-			default:
-				snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
-				         __FILE__, __LINE__, CONTROL_STATE);
-				usart_transmit_str(msg);
-				CONTROL_STATE = CONTROL_OFF;
-				return;
-		}
-		for (i = 0; i < LIGHT_COUNT; i++) {
-			lights_on[LIGHT_COUNT-i] = ((figure & ((uint32_t) 1 << i)) != 0) &&
-			                           time_flashing_on(2.0);
-		}
+		update_lights_control(lights_on, &current_tm);
 	}
 	switch_lights(lights_on);
 }
