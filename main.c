@@ -11,8 +11,10 @@
 #define LOCATION_LATITUDE 5.8372
 
 // 256 clock ticks correspond to one second
-#define INTS_PER_SECOND 256
+#define INTS_PER_SECOND 256.0
 
+// Update the state twice per second
+#define UPDATES_PER_SECOND 2.0
 
 #include "random.h"
 #include "usart.h"
@@ -83,7 +85,7 @@ volatile enum {
 	CONTROL_HOUR, CONTROL_MINUTE, CONTROL_SECOND,
 	CONTROL_DAY, CONTROL_MONTH, CONTROL_YEAR
 } CONTROL_STATE = CONTROL_OFF;
-volatile uint32_t CONTROL_BUTTON_PRESSED_MS = 0;
+volatile uint16_t CONTROL_BUTTON_PRESSED_MS = 0;
 
 
 /* UTILITY FUNCTIONS */
@@ -448,7 +450,8 @@ ISR(INT0_vect)
 
 ISR(TIMER2_OVF_vect)
 {
-	if (++CLOCK_TICKS == 0) {
+	const uint8_t tmp = INTS_PER_SECOND / UPDATES_PER_SECOND;
+	if (++CLOCK_TICKS % tmp == 0) {
 		system_tick();
 		print_current_localtime();
 	}
@@ -671,11 +674,12 @@ int main(void)
 
 		// do update logic
 		if (control_button_is_down()) {
-			if (CONTROL_BUTTON_PRESSED_MS == LONG_PRESS_DURATION) {
+			if (CONTROL_BUTTON_PRESSED_MS >= LONG_PRESS_DURATION) {
 				control_button_longpress();
 			} else {
 				_delay_ms(1);
 				CONTROL_BUTTON_PRESSED_MS++;
+				update_state();
 			}
 		} else if (CONTROL_BUTTON_PRESSED_MS != 0) {
 			// control button has *just* been lifted
