@@ -12,7 +12,7 @@ RESET=25
 
 all: $(EXECUTABLE)
 
-$(EXECUTABLE): main.c random.o usart.o
+$(EXECUTABLE): main.c random.o
 
 $(EXECUTABLE).hex: $(EXECUTABLE)
 	$(OBJ2HEX) -R .eeprom -O ihex $(EXECUTABLE) $(EXECUTABLE).hex

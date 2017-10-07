@@ -1,23 +1,17 @@
-#define F_CPU 8000000L
-#define BAUD 9600UL
+#define F_CPU 1000000L
 #define BLOCK_BEGIN_M 45
 #define BLOCK_END_M 30
 #define BLOCK_ANNOUNCE_M 37
 #define DEFAULT_FLASH_FREQ 1.0
-#define DEFAULT_MSG_LEN 80
 #define LONG_PRESS_DURATION 1000 /* ms */
 // Location: Nijmegen, The Netherlands
 #define LOCATION_LONGITUDE 51.8126
 #define LOCATION_LATITUDE 5.8372
 
-// 256 clock ticks correspond to one second
-#define INTS_PER_SECOND 256.0
-
 // Update the state twice per second
 #define UPDATES_PER_SECOND 2.0
 
 #include "random.h"
-#include "usart.h"
 #include <avr/cpufunc.h>
 #include <avr/interrupt.h>
 #include <avr/io.h>
@@ -56,14 +50,10 @@ struct Output {
 };
 
 
-// clock ticks since the last seconds
-volatile uint8_t CLOCK_TICKS = 0;
-
-// state invalidated (if ==true, then update the state of the lights)
-volatile bool STATE_INVALIDATED = 1; // state invalidated on startup
+volatile bool PRESSING_CONTROL_BUTTON = false;
 
 // inputs and outputs
-const struct Input CONTROL_BUTTON = {&DDRD, PB7, &PIND, PIND7};
+const struct Input CONTROL_BUTTON = {&DDRD, DDD2, &PIND, PIND2};
 const struct Input S_SWITCH = {&DDRD, DDD5, &PIND, PIND5};
 const struct Output CPUBUSY_LED = {&DDRD, DDD4, &PORTD, PD4};
 const struct Output LIGHTS[] = {
@@ -73,10 +63,10 @@ const struct Output LIGHTS[] = {
 	{&DDRB, PB3, &PORTB, PB3},
 	{&DDRB, PB4, &PORTB, PB4},
 	{&DDRB, PB5, &PORTB, PB5},
-	{&DDRC, PB0, &PORTC, PC0},
-	{&DDRC, PB1, &PORTC, PB1},
-	{&DDRC, PB2, &PORTC, PB2},
-	{&DDRC, PB3, &PORTC, PB3}
+	{&DDRC, PC0, &PORTC, PC0},
+	{&DDRC, PC1, &PORTC, PC1},
+	{&DDRC, PC2, &PORTC, PC2},
+	{&DDRC, PC3, &PORTC, PC3}
 };
 const size_t LIGHT_COUNT = sizeof(LIGHTS) / sizeof(LIGHTS[0]);
 volatile enum {K_OFF, K_ON, K_FLASHING} K_STATE = K_OFF;
@@ -154,14 +144,13 @@ static bool tm_hms_is_between(const struct tm_hms cur,
 
 static bool time_flashing_on(const float freq)
 {
-	const uint32_t dticks = (uint32_t) round(((float) INTS_PER_SECOND) / (2.0*freq));
-	return (CLOCK_TICKS / dticks) % 2 == 0;
+	return time(NULL) % 2 == 0;
 }
 
 
 static bool control_button_is_down()
 {
-	return (*CONTROL_BUTTON.pin_reg & (1 << CONTROL_BUTTON.pin_shl)) == 0;
+	return (*CONTROL_BUTTON.pin_reg & (1 << CONTROL_BUTTON.pin_shl)) != 0;
 }
 
 
@@ -169,27 +158,13 @@ static bool control_button_is_down()
 
 static void cpubusy_on()
 {
-	*CPUBUSY_LED.port_reg |= CPUBUSY_LED.port_shl;
+	*CPUBUSY_LED.port_reg |= (1 << CPUBUSY_LED.port_shl);
 }
 
 
 static void cpubusy_off()
 {
-	*CPUBUSY_LED.port_reg &= (unsigned char) ~CPUBUSY_LED.port_shl;
-}
-
-
-static void print_current_localtime()
-{
-	char msg[DEFAULT_MSG_LEN], ctime_str[DEFAULT_MSG_LEN];
-	const time_t current_time = time(NULL);
-
-	// get a ctime formatted string
-	ctime_r(&current_time, ctime_str);
-
-	// write message
-	snprintf(msg, sizeof(msg), "[INFO] current time: %s\r\n", ctime_str);
-	usart_transmit_str(msg);
+	*CPUBUSY_LED.port_reg &= ~(1 << CPUBUSY_LED.port_shl);
 }
 
 
@@ -364,7 +339,6 @@ static bool get_light_up_value(const struct tm *cur_tm)
 
 static void control_button_shortpress()
 {
-	char msg[DEFAULT_MSG_LEN];
 	time_t current_time = time(NULL);
 	struct tm current_tm;
 
@@ -400,9 +374,6 @@ static void control_button_shortpress()
 			}
 			break;
 		default:
-			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
-					 __FILE__, __LINE__, CONTROL_STATE);
-			usart_transmit_str(msg);
 			CONTROL_STATE = CONTROL_OFF;
 			return;
 	}
@@ -414,8 +385,6 @@ static void control_button_shortpress()
 
 static void control_button_longpress()
 {
-	char msg[DEFAULT_MSG_LEN];
-
 	// go to the next control state
 	switch (CONTROL_STATE) {
 		case CONTROL_OFF:
@@ -428,12 +397,15 @@ static void control_button_longpress()
 			CONTROL_STATE = CONTROL_SECOND;
 			break;
 		case CONTROL_SECOND:
-			CONTROL_STATE = CONTROL_OFF;
+			CONTROL_STATE = CONTROL_DAY;
+			break;
+		case CONTROL_DAY:
+			CONTROL_STATE = CONTROL_MONTH;
+			break;
+		case CONTROL_MONTH:
+			CONTROL_STATE = CONTROL_YEAR;
 			break;
 		default:
-			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
-					 __FILE__, __LINE__, CONTROL_STATE);
-			usart_transmit_str(msg);
 			CONTROL_STATE = CONTROL_OFF;
 			break;
 	}
@@ -445,17 +417,12 @@ static void control_button_longpress()
 ISR(INT0_vect)
 {
 	// the CONTROL button is down, reset the timer
-	CONTROL_BUTTON_PRESSED_MS = 0;
+	PRESSING_CONTROL_BUTTON = true;
 }
 
 ISR(TIMER2_OVF_vect)
 {
-	const uint8_t tmp = INTS_PER_SECOND / UPDATES_PER_SECOND;
-	if (++CLOCK_TICKS % tmp == 0) {
-		system_tick();
-		print_current_localtime();
-	}
-	STATE_INVALIDATED = true;
+	system_tick();
 }
 
 
@@ -466,10 +433,10 @@ static void init()
 	size_t i;
 	const struct Output *light;
 	uint8_t ddrb = 0, ddrc = 0, ddrd = 0;
-	char msg[DEFAULT_MSG_LEN];
 
 	// set cpubusy led pin to output
 	*CPUBUSY_LED.ddr_reg |= (uint8_t) (1 << CPUBUSY_LED.ddr_shl);
+	_NOP();
 
 	// set all light pins to output
 	for (i = 0; i < LIGHT_COUNT; i++) {
@@ -480,10 +447,6 @@ static void init()
 			ddrc |= (uint8_t) (1 << light->ddr_shl);
 		} else if (light->ddr_reg == &DDRD) {
 			ddrd |= (uint8_t) (1 << light->ddr_shl);
-		} else {
-			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid DDRx register: 0x%p\r\n",
-			         __FILE__, __LINE__, light->ddr_reg);
-			usart_transmit_str(msg);
 		}
 	}
 	DDRB |= ddrb;
@@ -506,7 +469,7 @@ static void init()
 
 	// initialize the system time
 #ifdef DEFAULT_TIME
-	set_system_time(DEFAULT_TIME - UNIX_OFFSET)
+	set_system_time(DEFAULT_TIME - UNIX_OFFSET);
 #else /* DEFAULT_TIME */
 	set_system_time(0);
 #endif /* DEFAULT_TIME */
@@ -523,13 +486,14 @@ static void init()
 	TIMSK |= 1 << TOIE2; // enable overflow interrupt
 
 	// setup the INT0 interrupt source
-	MCUCR |= 1 << ISC01; // on falling edge
+	MCUCR |= (1 << ISC00) | (1 << ISC01); // on rising edge
 	GICR |= 1 << INT0; // enable interrupt on INT0
 
 #ifdef ENABLE_WATCHDOG
 	// enable watchdog Timer (watchdog of about 2 secs)
-	wdt_reset();
 	WDTCR |= (1 << WDE) | (1 << WDP2) | (1 << WDP1) | (1 << WDP0);
+	_NOP();
+	wdt_reset();
 #endif /* ENABLE_WATCHDOG */
 
 	// enable global interrupt
@@ -539,8 +503,6 @@ static void init()
 
 static void update_state()
 {
-	char msg[DEFAULT_MSG_LEN];
-
 	switch (K_STATE) {
 		case K_ON:
 		case K_OFF:
@@ -562,9 +524,6 @@ static void update_state()
 			break;
 		default:
 			// unreachable state, reset
-			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid K_STATE: %i\r\n",
-			         __FILE__, __LINE__, K_STATE);
-			usart_transmit_str(msg);
 			K_STATE = K_OFF;
 	}
 }
@@ -588,14 +547,10 @@ static void update_lights_normal(bool *lights_on, const struct tm *current_tm)
 static void update_lights_control(bool *lights_on, const struct tm *current_tm)
 {
 	uint32_t figure;
-	char msg[DEFAULT_MSG_LEN];
 	size_t i;
 
 	switch (CONTROL_STATE) {
 		case CONTROL_OFF:
-			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) unreachable\r\n",
-			         __FILE__, __LINE__);
-			usart_transmit_str(msg);
 			return;
 		case CONTROL_HOUR:
 			figure = current_tm->tm_hour;
@@ -616,17 +571,13 @@ static void update_lights_control(bool *lights_on, const struct tm *current_tm)
 			figure = current_tm->tm_year - 100; // s.t. 0 is equiv to 2000
 			break;
 		default:
-			snprintf(msg, sizeof(msg), "[ERROR] (%s:%i) invalid CONTROL_STATE: %i\r\n",
-			         __FILE__, __LINE__, CONTROL_STATE);
-			usart_transmit_str(msg);
 			CONTROL_STATE = CONTROL_OFF;
 			return;
 	}
 
-	// show the figure in binary format (flashing with 2 Hz)
+	// show the figure in binary format (flashing with 0.5 Hz)
 	for (i = 0; i < LIGHT_COUNT; i++) {
-		lights_on[LIGHT_COUNT-i] = ((figure & ((uint32_t) 1 << i)) != 0) &&
-		                           time_flashing_on(2.0);
+		lights_on[LIGHT_COUNT-(i+1)] = ((figure & ((uint32_t) 1 << i)) != 0);
 	}
 
 }
@@ -641,10 +592,10 @@ static void update_lights()
 
 	localtime_r(&current_time, &current_tm);
 
-	if (CONTROL_STATE == CONTROL_OFF) {
-		update_lights_normal(lights_on, &current_tm);
-	} else {
+	if (CONTROL_STATE != CONTROL_OFF) {
 		update_lights_control(lights_on, &current_tm);
+	} else {
+		update_lights_normal(lights_on, &current_tm);
 	}
 	switch_lights(lights_on);
 }
@@ -652,48 +603,47 @@ static void update_lights()
 
 int main(void)
 {
-	// initialize USART for debugging
-	usart_init();
-
-	usart_transmit_str("[INFO] starting liftlighter\r\n");
 	init();
-
-	usart_transmit_str("[INFO] going into sleep mode\r\n");
 	MCUCR |= 1 << SE; // enable sleep
 
 	do_sleep:
 	sleep_cpu();
-	while (STATE_INVALIDATED) {
-		// turn on cpubusy led
-		cpubusy_on();
 
-		// reset the watchdog
-		#ifdef ENABLE_WATCHDOG
-				wdt_reset();
-		#endif /* ENABLE_WATCHDOG */
+	// reset the watchdog
+	#ifdef ENABLE_WATCHDOG
+	wdt_reset();
+	#endif /* ENABLE_WATCHDOG */
 
-		// do update logic
-		if (control_button_is_down()) {
+	while (true) {
+		if (PRESSING_CONTROL_BUTTON && control_button_is_down()) {
 			if (CONTROL_BUTTON_PRESSED_MS >= LONG_PRESS_DURATION) {
+				// trigger long press
 				control_button_longpress();
+				CONTROL_BUTTON_PRESSED_MS = 0;
+				// disable the button until the next 'down' event
+				PRESSING_CONTROL_BUTTON = false;
 			} else {
-				_delay_ms(1);
 				CONTROL_BUTTON_PRESSED_MS++;
-				update_state();
+				_delay_ms(1);
 			}
-		} else if (CONTROL_BUTTON_PRESSED_MS != 0) {
-			// control button has *just* been lifted
-			control_button_shortpress();
+		} else if (PRESSING_CONTROL_BUTTON && CONTROL_BUTTON_PRESSED_MS > 0) {
+				// button has *just* been lifter, trigger short press
+				control_button_shortpress();
+				CONTROL_BUTTON_PRESSED_MS = 0;
+				PRESSING_CONTROL_BUTTON = false;
 		} else {
-			STATE_INVALIDATED = false;
+			// do update logic
 			update_state();
+
+			// show new light state
+			update_lights();
+
+			if (CONTROL_STATE == CONTROL_OFF) {
+				cpubusy_off();
+			} else {
+				cpubusy_on();
+			}
 		}
-
-		// show new light state
-		update_lights();
-
-		// turn off cpubusy led
-		cpubusy_off();
 	}
 	goto do_sleep;
 

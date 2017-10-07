@@ -1,0 +1,14 @@
+** Drc report for /home/daan/Documents/Code/liftlighter/pcb/liftlighter.kicad_pcb **
+** Created on 2017-03-22 22:27:50 **
+
+** Found 1 DRC errors **
+ErrType(16): Two track ends too close
+    @ (140,335 mm,50,800 mm): Track 0,250 mm, net [GND] (2) on layer B.Cu, length: 5,080 mm
+    @ (135,255 mm,50,800 mm): Track 0,250 mm, net [VCC] (4) on layer B.Cu, length: 2,694 mm
+
+** Found 1 unconnected pads **
+ErrType(2): Unconnected pads
+    @ (148,590 mm,54,610 mm): Pad 1 on F.Cu, B.Cu, Internal, Non-copper of SW1 net GND
+    @ (142,930 mm,54,610 mm): Pad 2 on F.Cu, B.Cu, Internal, Non-copper of SW2
+
+** End of Report **

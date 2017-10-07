@@ -1,0 +1,11 @@
+** Drc report for /home/daan/Documents/Code/liftlighter/pcb/liftlighter.kicad_pcb **
+** Created on 2017-03-22 22:28:17 **
+
+** Found 0 DRC errors **
+
+** Found 1 unconnected pads **
+ErrType(2): Unconnected pads
+    @ (148,590 mm,54,610 mm): Pad 1 on F.Cu, B.Cu, Internal, Non-copper of SW1 net GND
+    @ (142,930 mm,54,610 mm): Pad 2 on F.Cu, B.Cu, Internal, Non-copper of SW2
+
+** End of Report **
