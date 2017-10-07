@@ -531,16 +531,16 @@ static void update_state()
 
 static void update_lights_normal(bool *lights_on, const struct tm *current_tm)
 {
-	lights_on[0] = get_light_down_value(current_tm);
-	lights_on[1] = get_light_one_value(current_tm);
-	lights_on[2] = get_light_two_value(current_tm);
-	lights_on[3] = get_light_three_value(current_tm);
-	lights_on[4] = get_light_four_value(current_tm);
-	lights_on[5] = get_light_five_value(current_tm);
-	lights_on[6] = get_light_b_value(current_tm);
-	lights_on[7] = get_light_k_value(current_tm);
-	lights_on[8] = get_light_s_value(current_tm);
-	lights_on[9] = get_light_up_value(current_tm);
+	lights_on[0] = get_light_up_value(current_tm);
+	lights_on[1] = get_light_k_value(current_tm);
+	lights_on[2] = get_light_s_value(current_tm);
+	lights_on[3] = get_light_b_value(current_tm);
+	lights_on[4] = get_light_one_value(current_tm);
+	lights_on[5] = get_light_two_value(current_tm);
+	lights_on[6] = get_light_three_value(current_tm);
+	lights_on[7] = get_light_four_value(current_tm);
+	lights_on[8] = get_light_five_value(current_tm);
+	lights_on[9] = get_light_down_value(current_tm);
 }
 
 
