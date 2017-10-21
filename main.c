@@ -2,7 +2,6 @@
 #define BLOCK_BEGIN_M 45
 #define BLOCK_END_M 30
 #define BLOCK_ANNOUNCE_M 37
-#define DEFAULT_FLASH_FREQ 1.0
 #define LONG_PRESS_DURATION 1000 /* ms */
 // Location: Nijmegen, The Netherlands
 #define LOCATION_LONGITUDE 51.8126
@@ -11,6 +10,7 @@
 // Update the state twice per second
 #define UPDATES_PER_SECOND 2.0
 
+#include "nl_dst.h"
 #include "random.h"
 #include <avr/cpufunc.h>
 #include <avr/interrupt.h>
@@ -49,8 +49,12 @@ struct Output {
 	const unsigned char port_shl;
 };
 
+// 2 ticks per seconds, if we already tick'd this second then HALFSECOND = true
+volatile bool HALFSECOND = false;
 
-volatile bool PRESSING_CONTROL_BUTTON = false;
+volatile enum {
+	UP, DOWN, DOWN_AND_HANDLED
+} CONTROL_BUTTON_STATE = UP;
 
 // inputs and outputs
 const struct Input CONTROL_BUTTON = {&DDRD, DDD2, &PIND, PIND2};
@@ -142,9 +146,9 @@ static bool tm_hms_is_between(const struct tm_hms cur,
 }
 
 
-static bool time_flashing_on(const float freq)
+static bool flashing_is_on()
 {
-	return time(NULL) % 2 == 0;
+	return HALFSECOND;
 }
 
 
@@ -215,7 +219,7 @@ static bool get_light_one_value(const struct tm *cur_tm)
 {
 	// on during the first block
 	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
-	const struct tm_hms start = tm_hms_new_hm(8, BLOCK_END_M);
+	const struct tm_hms start = tm_hms_new_hm(8, BLOCK_BEGIN_M);
 	const struct tm_hms end = tm_hms_new_hm(10, BLOCK_END_M);
 	const struct tm_hms a_start = tm_hms_new_hm(8, BLOCK_ANNOUNCE_M);
 	const struct tm_hms a_end = tm_hms_new_hm(8, BLOCK_BEGIN_M);
@@ -223,7 +227,7 @@ static bool get_light_one_value(const struct tm *cur_tm)
 	if (tm_hms_is_between(cur, start, end)) {
 		return true;
 	} else if (tm_hms_is_between(cur, a_start, a_end)) {
-		return time_flashing_on(DEFAULT_FLASH_FREQ);
+		return flashing_is_on();
 	}
 	return false;
 }
@@ -233,7 +237,7 @@ static bool get_light_two_value(const struct tm *cur_tm)
 {
 	// on during the second block
 	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
-	const struct tm_hms start = tm_hms_new_hm(10, BLOCK_END_M);
+	const struct tm_hms start = tm_hms_new_hm(10, BLOCK_BEGIN_M);
 	const struct tm_hms end = tm_hms_new_hm(12, BLOCK_END_M);
 	const struct tm_hms a_start = tm_hms_new_hm(10, BLOCK_ANNOUNCE_M);
 	const struct tm_hms a_end = tm_hms_new_hm(10, BLOCK_BEGIN_M);
@@ -241,7 +245,7 @@ static bool get_light_two_value(const struct tm *cur_tm)
 	if (tm_hms_is_between(cur, start, end)) {
 		return true;
 	} else if (tm_hms_is_between(cur, a_start, a_end)) {
-		return time_flashing_on(DEFAULT_FLASH_FREQ);
+		return flashing_is_on();
 	}
 	return false;
 }
@@ -251,7 +255,7 @@ static bool get_light_three_value(const struct tm *cur_tm)
 {
 	// on during the third block
 	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
-	const struct tm_hms start = tm_hms_new_hm(13, BLOCK_END_M);
+	const struct tm_hms start = tm_hms_new_hm(13, BLOCK_BEGIN_M);
 	const struct tm_hms end = tm_hms_new_hm(15, BLOCK_END_M);
 	const struct tm_hms a_start = tm_hms_new_hm(13, BLOCK_ANNOUNCE_M);
 	const struct tm_hms a_end = tm_hms_new_hm(13, BLOCK_BEGIN_M);
@@ -259,7 +263,7 @@ static bool get_light_three_value(const struct tm *cur_tm)
 	if (tm_hms_is_between(cur, start, end)) {
 		return true;
 	} else if (tm_hms_is_between(cur, a_start, a_end)) {
-		return time_flashing_on(DEFAULT_FLASH_FREQ);
+		return flashing_is_on();
 	}
 	return false;
 }
@@ -269,7 +273,7 @@ static bool get_light_four_value(const struct tm *cur_tm)
 {
 	// on during the fourth block
 	const struct tm_hms cur = tm_hms_from_tm(cur_tm);
-	const struct tm_hms start = tm_hms_new_hm(15, BLOCK_END_M);
+	const struct tm_hms start = tm_hms_new_hm(15, BLOCK_BEGIN_M);
 	const struct tm_hms end = tm_hms_new_hm(17, BLOCK_END_M);
 	const struct tm_hms a_start = tm_hms_new_hm(15, BLOCK_ANNOUNCE_M);
 	const struct tm_hms a_end = tm_hms_new_hm(15, BLOCK_BEGIN_M);
@@ -277,7 +281,7 @@ static bool get_light_four_value(const struct tm *cur_tm)
 	if (tm_hms_is_between(cur, start, end)) {
 		return true;
 	} else if (tm_hms_is_between(cur, a_start, a_end)) {
-		return time_flashing_on(DEFAULT_FLASH_FREQ);
+		return flashing_is_on();
 	}
 	return false;
 }
@@ -305,7 +309,7 @@ static bool get_light_b_value(const struct tm *cur_tm)
 
 static bool get_light_k_value(const struct tm *cur_tm)
 {
-	return K_STATE == K_ON || (K_STATE == K_FLASHING && time_flashing_on(2.0));
+	return K_STATE == K_ON || (K_STATE == K_FLASHING && flashing_is_on());
 }
 
 
@@ -417,14 +421,24 @@ static void control_button_longpress()
 ISR(INT0_vect)
 {
 	// the CONTROL button is down, reset the timer
-	PRESSING_CONTROL_BUTTON = true;
+	if (CONTROL_BUTTON_STATE == UP) {
+		CONTROL_BUTTON_STATE = DOWN;
+	};
+	CONTROL_BUTTON_PRESSED_MS = 0;
 }
 
 ISR(TIMER2_OVF_vect)
 {
-	system_tick();
+	if (HALFSECOND) {
+		system_tick();
+	}
+	HALFSECOND = !HALFSECOND;
 }
 
+
+int my_dst(const time_t *timer, int32_t *z) {
+	return ONE_HOUR;
+}
 
 /* MAINLOOP FUNCTIONS */
 
@@ -474,14 +488,14 @@ static void init()
 	set_system_time(0);
 #endif /* DEFAULT_TIME */
 	set_zone(+1 * ONE_HOUR);
-	set_dst(eu_dst);
+	set_dst(nl_dst);
 	set_position(LOCATION_LONGITUDE, LOCATION_LATITUDE);
 
 	// initialize Timer/Counter2 to measure seconds
 	_delay_ms(1000); // wait for crystal to stabilize
 	ASSR |= 1 << AS2; // set async clocking
-	// prescaler 128 s.t. 1 second exactly overflows a 8 bit value
-	TCCR2 = (1 << CS22) | (1 << CS20); // set the rest to 0
+	// prescaler 64 s.t. 0.5 seconds exactly overflows a 8 bit value
+	TCCR2 = (1 << CS22); // set the rest to 0
 	while ((ASSR & (1 << TCR2UB)) != 0) {} // wait TCCR2 to update
 	TIMSK |= 1 << TOIE2; // enable overflow interrupt
 
@@ -546,29 +560,29 @@ static void update_lights_normal(bool *lights_on, const struct tm *current_tm)
 
 static void update_lights_control(bool *lights_on, const struct tm *current_tm)
 {
-	uint32_t figure;
+	uint32_t fig; // figure (hour/minute/etc.)
 	size_t i;
 
 	switch (CONTROL_STATE) {
 		case CONTROL_OFF:
 			return;
 		case CONTROL_HOUR:
-			figure = current_tm->tm_hour;
+			fig = current_tm->tm_hour;
 			break;
 		case CONTROL_MINUTE:
-			figure = current_tm->tm_min;
+			fig = current_tm->tm_min;
 			break;
 		case CONTROL_SECOND:
-			figure = current_tm->tm_sec;
+			fig = current_tm->tm_sec;
 			break;
 		case CONTROL_DAY:
-			figure = current_tm->tm_mday;
+			fig = current_tm->tm_mday;
 			break;
 		case CONTROL_MONTH:
-			figure = current_tm->tm_mon + 1; // s.t. 1 is January
+			fig = current_tm->tm_mon + 1; // s.t. 1 is January
 			break;
 		case CONTROL_YEAR:
-			figure = current_tm->tm_year - 100; // s.t. 0 is equiv to 2000
+			fig = current_tm->tm_year - 100; // s.t. 0 is equiv to 2000
 			break;
 		default:
 			CONTROL_STATE = CONTROL_OFF;
@@ -577,7 +591,9 @@ static void update_lights_control(bool *lights_on, const struct tm *current_tm)
 
 	// show the figure in binary format (flashing with 0.5 Hz)
 	for (i = 0; i < LIGHT_COUNT; i++) {
-		lights_on[LIGHT_COUNT-(i+1)] = ((figure & ((uint32_t) 1 << i)) != 0);
+		const bool flashing_on = flashing_is_on();
+		const bool on = ((fig & ((uint32_t) 1 << i)) != 0);
+		lights_on[LIGHT_COUNT-(i+1)] = on && flashing_on;
 	}
 
 }
@@ -614,37 +630,44 @@ int main(void)
 	wdt_reset();
 	#endif /* ENABLE_WATCHDOG */
 
+	cli(); // diable interrupts to prevent spurious INTO interrupts
+	cpubusy_on(); // cpubusy on
+
 	while (true) {
-		if (PRESSING_CONTROL_BUTTON && control_button_is_down()) {
+		// turn on the cpubusy light
+
+		if (CONTROL_BUTTON_STATE == DOWN && control_button_is_down()) {
 			if (CONTROL_BUTTON_PRESSED_MS >= LONG_PRESS_DURATION) {
 				// trigger long press
 				control_button_longpress();
-				CONTROL_BUTTON_PRESSED_MS = 0;
 				// disable the button until the next 'down' event
-				PRESSING_CONTROL_BUTTON = false;
+				CONTROL_BUTTON_STATE = DOWN_AND_HANDLED;
 			} else {
 				CONTROL_BUTTON_PRESSED_MS++;
 				_delay_ms(1);
 			}
-		} else if (PRESSING_CONTROL_BUTTON && CONTROL_BUTTON_PRESSED_MS > 0) {
-				// button has *just* been lifter, trigger short press
-				control_button_shortpress();
-				CONTROL_BUTTON_PRESSED_MS = 0;
-				PRESSING_CONTROL_BUTTON = false;
+		} else if (CONTROL_BUTTON_STATE == DOWN) {
+			// button has *just* been lifted
+			control_button_shortpress();
+			CONTROL_BUTTON_STATE = DOWN_AND_HANDLED;
+			break;
 		} else {
+			if (!control_button_is_down()) {
+				CONTROL_BUTTON_STATE = UP;
+			}
+
 			// do update logic
 			update_state();
 
 			// show new light state
 			update_lights();
 
-			if (CONTROL_STATE == CONTROL_OFF) {
-				cpubusy_off();
-			} else {
-				cpubusy_on();
-			}
+			break;
 		}
 	}
+	// turn off the cpubusy light
+	if (CONTROL_STATE == CONTROL_OFF) cpubusy_off();
+	sei();
 	goto do_sleep;
 
 	return 0;
