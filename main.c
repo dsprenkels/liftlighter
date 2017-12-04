@@ -13,6 +13,7 @@
 #include "nl_dst.h"
 #include "random.h"
 #include <avr/cpufunc.h>
+#include <avr/eeprom.h>
 #include <avr/interrupt.h>
 #include <avr/io.h>
 #include <avr/sleep.h>
@@ -80,6 +81,9 @@ volatile enum {
 	CONTROL_DAY, CONTROL_MONTH, CONTROL_YEAR
 } CONTROL_STATE = CONTROL_OFF;
 volatile uint16_t CONTROL_BUTTON_PRESSED_MS = 0;
+
+// EEPROM address of the backed up timestamp
+uint32_t EEMEM TIME_BACKUP = 0xffffffff;
 
 
 /* UTILITY FUNCTIONS */
@@ -415,6 +419,28 @@ static void control_button_longpress()
 	}
 }
 
+// this function assumes that interrupts are currently DISABLED
+static void backup_time(uint32_t timer)
+{
+	eeprom_write_dword(&TIME_BACKUP, timer);
+}
+
+
+// this function also assumes that interrupts are currently DISABLED
+static void maybe_backup_time() {
+	uint32_t timer;
+	struct tm tm;
+
+	if (HALFSECOND) return;
+
+	time(&timer);
+	gmtime_r(&timer, &tm);
+
+	if (tm.tm_hour == 0 && tm.tm_min == 0 && tm.tm_sec == 0) {
+		backup_time(timer);
+	}
+}
+
 
 /* INTERRUPT HANDLERS */
 
@@ -447,6 +473,7 @@ static void init()
 	size_t i;
 	const struct Output *light;
 	uint8_t ddrb = 0, ddrc = 0, ddrd = 0;
+	uint32_t timer;
 
 	// set cpubusy led pin to output
 	*CPUBUSY_LED.ddr_reg |= (uint8_t) (1 << CPUBUSY_LED.ddr_shl);
@@ -482,11 +509,17 @@ static void init()
 	_NOP();
 
 	// initialize the system time
+	timer = eeprom_read_dword(&TIME_BACKUP);
+	if (timer != 0xffffffff) {
+		// Restore backup time
+		set_system_time(timer);
+	} else {
 #ifdef DEFAULT_TIME
-	set_system_time(DEFAULT_TIME - UNIX_OFFSET);
+		set_system_time(DEFAULT_TIME - UNIX_OFFSET);
 #else /* DEFAULT_TIME */
-	set_system_time(0);
+		set_system_time(0);
 #endif /* DEFAULT_TIME */
+	}
 	set_zone(+1 * ONE_HOUR);
 	set_dst(nl_dst);
 	set_position(LOCATION_LONGITUDE, LOCATION_LATITUDE);
@@ -517,6 +550,9 @@ static void init()
 
 static void update_state()
 {
+	if (HALFSECOND) {
+		return;
+	}
 	switch (K_STATE) {
 		case K_ON:
 		case K_OFF:
@@ -630,7 +666,7 @@ int main(void)
 	wdt_reset();
 	#endif /* ENABLE_WATCHDOG */
 
-	cli(); // diable interrupts to prevent spurious INTO interrupts
+	cli(); // disable interrupts to prevent spurious INTO interrupts
 	cpubusy_on(); // cpubusy on
 
 	while (true) {
@@ -655,6 +691,9 @@ int main(void)
 			if (!control_button_is_down()) {
 				CONTROL_BUTTON_STATE = UP;
 			}
+
+			// if this is a day change, backup the time
+			maybe_backup_time();
 
 			// do update logic
 			update_state();
