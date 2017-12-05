@@ -12,6 +12,7 @@
 
 #include "nl_dst.h"
 #include "random.h"
+#include "uart.h"
 #include <avr/cpufunc.h>
 #include <avr/eeprom.h>
 #include <avr/interrupt.h>
@@ -159,6 +160,13 @@ static bool flashing_is_on()
 static bool control_button_is_down()
 {
 	return (*CONTROL_BUTTON.pin_reg & (1 << CONTROL_BUTTON.pin_shl)) != 0;
+}
+
+
+static void printf_time(char *fmt, time_t timer)
+{
+	if (timer == 0) time(&timer);
+	printf(fmt, ctime(&timer));
 }
 
 
@@ -388,6 +396,7 @@ static void control_button_shortpress()
 
 	// write the new system time
 	set_system_time(mktime(&current_tm));
+	printf_time("New time: %s\r\n", 0);
 }
 
 
@@ -396,25 +405,33 @@ static void control_button_longpress()
 	// go to the next control state
 	switch (CONTROL_STATE) {
 		case CONTROL_OFF:
+			printf("Control mode on\r\n");
 			CONTROL_STATE = CONTROL_HOUR;
+			printf("Control mode: hour\r\n");
 			break;
 		case CONTROL_HOUR:
 			CONTROL_STATE = CONTROL_MINUTE;
+			printf("Control mode: minute\r\n");
 			break;
 		case CONTROL_MINUTE:
 			CONTROL_STATE = CONTROL_SECOND;
+			printf("Control mode: second\r\n");
 			break;
 		case CONTROL_SECOND:
 			CONTROL_STATE = CONTROL_DAY;
+			printf("Control mode: day\r\n");
 			break;
 		case CONTROL_DAY:
 			CONTROL_STATE = CONTROL_MONTH;
+			printf("Control mode: month\r\n");
 			break;
 		case CONTROL_MONTH:
 			CONTROL_STATE = CONTROL_YEAR;
+			printf("Control mode: year\r\n");
 			break;
 		default:
 			CONTROL_STATE = CONTROL_OFF;
+			printf("Control mode off\r\n");
 			break;
 	}
 }
@@ -422,7 +439,9 @@ static void control_button_longpress()
 // this function assumes that interrupts are currently DISABLED
 static void backup_time(uint32_t timer)
 {
+	printf("Backing up time... ");
 	eeprom_write_dword(&TIME_BACKUP, timer);
+	printf("ok\r\n");
 }
 
 
@@ -438,6 +457,20 @@ static void maybe_backup_time() {
 
 	if (tm.tm_hour == 0 && tm.tm_min == 0 && tm.tm_sec == 0) {
 		backup_time(timer);
+	}
+}
+
+// this function dumps the current time on every minute
+static void maybe_print_time() {
+	uint32_t timer;
+	struct tm tm;
+
+	if (HALFSECOND) return;
+
+	time(&timer);
+	gmtime_r(&timer, &tm);
+	if (tm.tm_sec == 0) {
+		printf_time("Current time: %s\r\n", timer);
 	}
 }
 
@@ -468,6 +501,12 @@ int my_dst(const time_t *timer, int32_t *z) {
 
 /* MAINLOOP FUNCTIONS */
 
+int console_put(char c, FILE *file)
+{
+	UART_transmit(c);
+	return 0;
+}
+
 static void init()
 {
 	size_t i;
@@ -478,6 +517,11 @@ static void init()
 	// set cpubusy led pin to output
 	*CPUBUSY_LED.ddr_reg |= (uint8_t) (1 << CPUBUSY_LED.ddr_shl);
 	_NOP();
+
+	// initialize the UART console
+	UART_init();
+	fdevopen(console_put, NULL);
+	printf("Starting liftlighter\r\n");
 
 	// set all light pins to output
 	for (i = 0; i < LIGHT_COUNT; i++) {
@@ -512,10 +556,14 @@ static void init()
 	timer = eeprom_read_dword(&TIME_BACKUP);
 	if (timer != 0xffffffff) {
 		// Restore backup time
+		printf("Restoring backup time... ");
 		set_system_time(timer);
+		printf("ok\r\n");
 	} else {
 #ifdef DEFAULT_TIME
+		printf("Setting timestamp to %lu... ", DEFAULT_TIME);
 		set_system_time(DEFAULT_TIME - UNIX_OFFSET);
+		printf("ok\r\n");
 #else /* DEFAULT_TIME */
 		set_system_time(0);
 #endif /* DEFAULT_TIME */
@@ -523,6 +571,7 @@ static void init()
 	set_zone(+1 * ONE_HOUR);
 	set_dst(nl_dst);
 	set_position(LOCATION_LONGITUDE, LOCATION_LATITUDE);
+	printf_time("Initialized time: %s\r\n", 0);
 
 	// initialize Timer/Counter2 to measure seconds
 	_delay_ms(1000); // wait for crystal to stabilize
@@ -540,6 +589,7 @@ static void init()
 	// enable watchdog Timer (watchdog of about 2 secs)
 	WDTCR |= (1 << WDE) | (1 << WDP2) | (1 << WDP1) | (1 << WDP0);
 	_NOP();
+	printf("Watchdog enabled\r\n");
 	wdt_reset();
 #endif /* ENABLE_WATCHDOG */
 
@@ -691,6 +741,9 @@ int main(void)
 			if (!control_button_is_down()) {
 				CONTROL_BUTTON_STATE = UP;
 			}
+
+			// on each minute print the current time
+			maybe_print_time();
 
 			// if this is a day change, backup the time
 			maybe_backup_time();

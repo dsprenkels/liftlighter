@@ -12,9 +12,7 @@ RESET=25
 
 all: $(TARGET)
 
-$(TARGET): main.c random.o nl_dst.o
-nl_dst.o: nl_dst.c nl_dst.h
-random.o: random.c random.h
+$(TARGET): main.c nl_dst.o random.o uart.o
 
 $(TARGET).hex: $(TARGET)
 	$(OBJ2HEX) -j .text -j .data -O ihex $(TARGET) $(TARGET).hex
